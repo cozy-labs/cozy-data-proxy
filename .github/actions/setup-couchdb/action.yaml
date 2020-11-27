@@ -1,0 +1,54 @@
+name: Setup CouchDB
+author: Erwan Guyader
+description: Starts a CouchDB server of the given version on the given port.
+inputs:
+  couchdb-version:
+    description: 'The version of CouchDB to run'
+    required: true
+  couchdb-port:
+    description: 'The port on which to expose the internal CouchDB port'
+    required: false
+    default: 5984
+env:
+  ASSETS_PATH: "${{ runner.temp }}/assets"
+  PODMAN_MACHINE_VERSION: 'v0.17'
+  BOOT2PODMAN_ISO_NAME: 'fedora'
+  BOOT2PODMAN_ISO_VERSION: 'af598af'
+runs:
+  using: composite
+  steps:
+    - name: Cache podman-machine
+      uses: actions/cache@v2
+      env:
+        cache-name: cache-podman-machine
+      with:
+        path: ${{ env.ASSETS_PATH }}/podman-machine
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ env.PODMAN_MACHINE_VERSION }}-${{ env.BOOT2PODMAN_ISO_NAME }}_${{ env.BOOT2PODMAN_ISO_VERSION }}
+
+    - name: Setup podman-machine
+      shell: bash
+      env:
+        EXEC_PATH: "${{ env.ASSETS_PATH }}/podman-machine/podman-machine"
+        ISO_PATH: "${{ env.ASSETS_PATH }}/podman-machine/boot2podman-${{ env.BOOT2PODMAN_ISO_NAME }}-${{ env.BOOT2PODMAN_ISO_VERSION }}.iso"
+      run: |
+        if [[ ! -f $EXEC_PATH ]]; then
+          curl -L https://github.com/boot2podman/machine/releases/download/${{ env.PODMAN_MACHINE_VERSION }}/podman-machine.darwin-amd64 --output $EXEC_PATH
+        fi
+        mv $EXEC_PATH /usr/local/bin/podman-machine
+        chmod +x /usr/local/bin/podman-machine
+
+        if [[ ! -f ${{ env.ASSETS_PATH }}/podman-machine/podman-machine ]]; then
+          curl -L https://github.com/boot2podman/boot2podman-${{ env.BOOT2PODMAN_ISO_NAME }}-iso/releases/download/${{ env.BOOT2PODMAN_ISO_VERSION }}/boot2podman-${{ env.BOOT2PODMAN_ISO_NAME }}.iso --output $ISO_PATH
+        fi
+        until podman-machine create --virtualbox-boot2podman-url "file://$ISO_PATH" box
+        do
+          sleep 1
+        done
+
+    - name: Setup CouchDB
+      shell: bash
+      run: |
+        podman-machine ssh box -L ${{ inputs.couchdb-port }}:localhost:5984 -N &
+        podman-machine ssh box -- sudo podman run -d -p 5984:5984 --name couch apache/couchdb:${{ inputs.couchdb-version }}
+        sleep 5
+        curl -X PUT http://localhost:${{ inputs.couchdb-port }}/{_users,_replicator,_global_changes}
