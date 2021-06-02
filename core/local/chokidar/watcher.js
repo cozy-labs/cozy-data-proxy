@@ -201,7 +201,6 @@ class LocalWatcher {
   async onFlush(rawEvents /*: ChokidarEvent[] */) {
     log.debug(`Flushed ${rawEvents.length} events`)
 
-    if (this.initialScan) this.initialScan.flushed = true
     this.events.emit('buffering-end')
     syncDir.ensureExistsSync(this)
     this.events.emit('local-start')

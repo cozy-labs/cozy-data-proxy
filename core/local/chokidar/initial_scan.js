@@ -68,38 +68,49 @@ const step = async (
   rawEvents /*: ChokidarEvent[] */,
   { buffer, initialScan, pouch } /*: InitialScanOpts */
 ) /*: Promise<?Array<ChokidarEvent>> */ => {
-  let events = rawEvents.filter(e => e.path !== '') // @TODO handle root dir events
-  if (initialScan != null) {
-    const paths = initialScan.paths
-    events
-      .filter(e => e.type.startsWith('add'))
-      .forEach(e => paths.push(metadata.id(e.path)))
-
-    const {
-      offlineEvents,
-      unappliedMoves,
-      emptySyncDir
-    } = await detectOfflineUnlinkEvents(initialScan, pouch)
-    events = offlineEvents.concat(events)
-
-    events = events.filter(e => {
-      return unappliedMoves.indexOf(metadata.id(e.path)) === -1
-    })
-
-    if (emptySyncDir) {
-      // it is possible this is a temporary faillure (too late mounting)
-      // push back the events and wait until next flush.
-      buffer.unflush(rawEvents)
-      if (--initialScan.emptyDirRetryCount === 0) {
-        throw new Error(SYNC_DIR_EMPTY_MESSAGE)
-      }
-      return initialScan.resolve()
-    }
-
-    log.debug({ initialEvents: events })
+  if (!initialScan || initialScan.flushed) {
+    return rawEvents.filter(hasPath) // @TODO handle root dir events
   }
 
+  // We mark the initial scan as flushed as soon as possible to avoid
+  // concurrent initial scan processings from later flushes.
+  initialScan.flushed = true
+
+  let events = rawEvents.filter(hasPath) // @TODO handle root dir events
+
+  const paths = initialScan.paths
+  events
+    .filter(e => hasPath(e) && e.type.startsWith('add'))
+    .forEach(e => paths.push(metadata.id(e.path)))
+
+  const {
+    offlineEvents,
+    unappliedMoves,
+    emptySyncDir
+  } = await detectOfflineUnlinkEvents(initialScan, pouch)
+  events = offlineEvents.concat(events)
+
+  events = events.filter(e => {
+    return unappliedMoves.indexOf(metadata.id(e.path)) === -1
+  })
+
+  if (emptySyncDir) {
+    // it is possible this is a temporary faillure (too late mounting)
+    // push back the events and wait until next flush.
+    buffer.unflush(rawEvents)
+    if (--initialScan.emptyDirRetryCount === 0) {
+      throw new Error(SYNC_DIR_EMPTY_MESSAGE)
+    }
+    return initialScan.resolve()
+  }
+
+  log.debug({ initialEvents: events }, 'filtered initial events')
+
   return events
+}
+
+function hasPath(event /*: ChokidarEvent */) /*: boolean %checks */ {
+  return event.path !== ''
 }
 
 module.exports = {
