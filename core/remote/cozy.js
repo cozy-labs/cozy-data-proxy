@@ -265,6 +265,18 @@ class RemoteCozy {
   ) /*: Promise<{last_seq: string, docs: Array<MetadataRemoteInfo|RemoteDeletion>}> */ {
     const { last_seq, results } = await getChangesFeed(since, this.client)
 
+    // FIXME: remove temporary hack when cozy-stack is fixed
+    results.forEach(r => {
+      // $FlowFixMe bug fixed in cozy-stack but not released yet
+      if (r.doc && r.doc.id) {
+        const { id, rev } = r.doc
+        r.doc._id = id
+        r.doc._rev = rev
+        delete r.doc.id
+        delete r.doc.rev
+      }
+    })
+
     // The stack docs: dirs, files (without a path), deletions
     const remoteDocs /*: Array<RemoteDoc|RemoteDeletion> */ = dropSpecialDocs(
       results.map(r => r.doc)

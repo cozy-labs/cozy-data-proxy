@@ -491,6 +491,8 @@ class Sync {
            *    would have generated a conflict copy
            * 3. have not merged the remote change that took the name and never
            *    will because we abandoned that change in the past
+           * 4. can't access the remote document because it is a directory
+           *    excluded from the synchronization on the current client
            *
            * We can solve 1. by marking our local change with an increased
            * error counter so it can be retried later, after we've applied the
@@ -506,10 +508,26 @@ class Sync {
            * Merge level.
            */
 
-          // We will retry to apply the change `MAX_SYNC_ATTEMPTS` times just
-          // in case.
-          if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
+          // FIXME: cannot work if the conflict comes from a new local directory
+          // since it does not have any `remote` attributes.
+          if (
+            change.doc.remote &&
+            change.doc.remote.type === 'directory' &&
+            this.remote.isNotSynchronizedWithClient(change.doc.remote)
+          ) {
+            // Solve 4.
+            // The conflict is resolved locally as the remote one is not
+            // synchronized and thus should not be modified by this client.
+            // Hopefully we don't encounter other issues like permission
+            // errors on Windows.
+            await this.local.resolveConflict(change.doc)
+          } else if (
+            !change.doc.errors ||
+            change.doc.errors < MAX_SYNC_ATTEMPTS
+          ) {
             // Solve 1. & 2.
+            // We will retry to apply the change `MAX_SYNC_ATTEMPTS` times just
+            // in case.
             this.blockSyncFor({ err: syncErr, change })
           } else {
             log.error(
@@ -517,7 +535,9 @@ class Sync {
               'Document already exists on Cozy'
             )
             // Solve 3.
-            await this.remote.resolveRemoteConflict(change.doc)
+            // We resolve the conflict on the remote Cozy to avoid local
+            // issues like permission issues on Windows.
+            await this.remote.resolveConflict(change.doc)
           }
           break
         case remoteErrors.DOCUMENT_IN_TRASH_CODE:

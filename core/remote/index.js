@@ -56,7 +56,7 @@ const log = logger({
  */
 class Remote /*:: implements Reader, Writer */ {
   /*::
-  other: Reader
+  other: Reader & Writer
   config: Config
   pouch: Pouch
   events: EventEmitter
@@ -422,9 +422,9 @@ class Remote /*:: implements Reader, Writer */ {
     return dir.remote
   }
 
-  async resolveRemoteConflict(
-    newMetadata /*: SavedMetadata */
-  ) /*: Promise<void> */ {
+  // FIXME: Find a better place for this function now that it can resolve the
+  // conflict either locally or on the remote Cozy.
+  async resolveConflict(newMetadata /*: SavedMetadata */) /*: Promise<void> */ {
     // Find conflicting document on remote Cozy
     const remoteDoc = await this.findDocByPath(newMetadata.path)
     if (!remoteDoc) return
@@ -433,9 +433,10 @@ class Remote /*:: implements Reader, Writer */ {
     const newName = path.basename(
       conflicts.generateConflictPath(newMetadata.path)
     )
+    const newPath = path.join(path.dirname(newMetadata.path), newName)
     log.info(
       {
-        path: path.join(path.dirname(newMetadata.path), newName),
+        path: newPath,
         oldpath: newMetadata.path
       },
       'Resolving remote conflict...'
@@ -453,6 +454,18 @@ class Remote /*:: implements Reader, Writer */ {
     }
 
     await this.remoteCozy.updateAttributesById(remoteDoc._id, attrs, opts)
+  }
+
+  isNotSynchronizedWithClient(dir /*: MetadataRemoteDir */) /*: boolean */ {
+    const {
+      client: { clientID },
+      flags
+    } = this.config
+    return (
+      (flags.differentialSync || process.env.NODE_ENV === 'test') &&
+      dir.not_synchronized_on != null &&
+      dir.not_synchronized_on.find(({ id }) => id === clientID) != null
+    )
   }
 }
 

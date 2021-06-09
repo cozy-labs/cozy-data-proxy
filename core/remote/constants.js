@@ -15,6 +15,7 @@ const DEFAULT_HEARTBEAT = 1000 * 60 // 1 minute
 module.exports = {
   // Doctypes
   FILES_DOCTYPE: 'io.cozy.files',
+  OAUTH_CLIENTS_DOCTYPE: 'io.cozy.oauth.clients',
 
   // Files document type
   DIR_TYPE: 'directory',

@@ -17,6 +17,7 @@ const bluebird = require('bluebird')
 const { TMP_DIR_NAME } = require('./constants')
 const { NOTE_MIME_TYPE } = require('../remote/constants')
 const stater = require('./stater')
+const conflicts = require('../utils/conflicts')
 const metadata = require('../metadata')
 const { hideOnWindows } = require('../utils/fs')
 const watcher = require('./watcher')
@@ -486,6 +487,31 @@ class Local /*:: implements Reader, Writer */ {
     const copy = _.cloneDeep(doc)
     copy.path = backupPath
     return copy
+  }
+
+  async resolveConflict(newMetadata /*: SavedMetadata */) /*: Promise<void> */ {
+    // Find conflicting document on local filesystem
+    const hasConflict = await fse.exists(newMetadata.path)
+    if (!hasConflict) return
+
+    // Generate a new name with a conflict suffix for the remote document
+    const newName = path.basename(
+      conflicts.generateConflictPath(newMetadata.path)
+    )
+    const newPath = path.join(path.dirname(newMetadata.path), newName)
+    log.info(
+      {
+        path: newPath,
+        oldpath: newMetadata.path
+      },
+      'Resolving local conflict...'
+    )
+
+    const doc = {
+      ...newMetadata,
+      path: newPath
+    }
+    await this.moveAsync(doc, newMetadata)
   }
 }
 
