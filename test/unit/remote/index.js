@@ -690,7 +690,7 @@ describe('remote.Remote', function() {
       })
     })
 
-    it('creates the dir if it does not exist', async function() {
+    it('throws an error if the directory does not exist', async function() {
       const deletedDir = await builders
         .remoteDir()
         .name('deleted-dir')
@@ -704,24 +704,9 @@ describe('remote.Remote', function() {
         .updatedAt(new Date().toISOString())
         .build()
 
-      await this.remote.updateFolderAsync(doc)
-
-      const created /*: RemoteJsonDoc */ = await cozy.files.statByPath(
-        '/deleted-dir'
+      await should(this.remote.updateFolderAsync(doc)).be.rejectedWith(
+        /does not exist/
       )
-      should(created.attributes).have.properties({
-        type: 'directory',
-        name: 'deleted-dir',
-        dir_id: deletedDir.dir_id,
-        tags: doc.tags
-      })
-      should(timestamp.roundedRemoteDate(created.attributes.updated_at)).equal(
-        doc.updated_at
-      )
-      should(doc.remote).have.properties({
-        _id: created._id,
-        _rev: created._rev
-      })
     })
 
     it('throws an error if it has no remote info', async function() {

@@ -256,18 +256,7 @@ class Remote /*:: implements Reader, Writer */ {
       )
       metadata.updateRemote(doc, newRemoteDoc)
     } catch (err) {
-      if (err.status !== 404) {
-        throw err
-      }
-
-      log.warn({ path }, "Directory doesn't exist anymore. Recreating it...")
-      const [newParentPath, newName] = dirAndName(path)
-      const newParent = await this.findDirectoryByPath(newParentPath)
-
-      const newRemoteDoc = await this.remoteCozy.createDirectory(
-        newDocumentAttributes(newName, newParent._id, doc.updated_at)
-      )
-      metadata.updateRemote(doc, newRemoteDoc)
+      throw err
     }
   }
 
