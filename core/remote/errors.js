@@ -72,6 +72,25 @@ class DirectoryNotFound extends Error {
   }
 }
 
+class ExcludedDirError extends Error {
+  /*::
+  path: string
+  */
+
+  constructor(path /*: string */) {
+    super(
+      `Directory ${path} was excluded from the synchronization on this client`
+    )
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, DirectoryNotFound)
+    }
+
+    this.name = 'ExcludedDirError'
+    this.path = path
+  }
+}
+
 class UnreachableError extends Error {
   /*::
   cozyURL: string
@@ -331,6 +350,7 @@ function detail(err /*: FetchError */) /*: ?string */ {
 module.exports = {
   CozyDocumentMissingError,
   DirectoryNotFound,
+  ExcludedDirError,
   RemoteError,
   UnreachableError,
   COZY_CLIENT_REVOKED_MESSAGE, // FIXME: should be removed once gui/main does not use it anymore

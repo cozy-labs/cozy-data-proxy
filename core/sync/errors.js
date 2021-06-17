@@ -16,6 +16,7 @@ import type { RemoteError, FetchError } from '../remote/errors'
 const SECONDS = 1000
 const MINUTES = 60 * SECONDS
 
+const EXCLUDED_DIR_CODE = 'ExcludedDir'
 const INCOMPATIBLE_DOC_CODE = 'IncompatibleDoc'
 const MISSING_PERMISSIONS_CODE = 'MissingPermissions'
 const NO_DISK_SPACE_CODE = 'NoDiskSpace'
@@ -139,6 +140,8 @@ const wrapError = (
     return new SyncError({ sideName, err, code: NO_DISK_SPACE_CODE, doc })
   } else if (err instanceof IncompatibleDocError) {
     return new SyncError({ sideName, err, code: INCOMPATIBLE_DOC_CODE, doc })
+  } else if (err instanceof remoteErrors.ExcludedDirError) {
+    return new SyncError({ sideName, err, code: EXCLUDED_DIR_CODE, doc })
   } else if (sideName === 'remote' || err.name === 'FetchError') {
     // FetchErrors can be raised from the LocalWriter when failing to download a
     // file for example. In this case the sideName will be "local" but the error
@@ -151,6 +154,7 @@ const wrapError = (
 }
 
 module.exports = {
+  EXCLUDED_DIR_CODE,
   INCOMPATIBLE_DOC_CODE,
   MISSING_PERMISSIONS_CODE,
   NO_DISK_SPACE_CODE,

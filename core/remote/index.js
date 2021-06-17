@@ -15,7 +15,7 @@ const conflicts = require('../utils/conflicts')
 const metadata = require('../metadata')
 const { ROOT_DIR_ID } = require('./constants')
 const { RemoteCozy } = require('./cozy')
-const { DirectoryNotFound } = require('./errors')
+const { DirectoryNotFound, ExcludedDirError } = require('./errors')
 const { RemoteWarningPoller } = require('./warning_poller')
 const { RemoteWatcher } = require('./watcher')
 const timestamp = require('../utils/timestamp')
@@ -128,6 +128,20 @@ class Remote /*:: implements Reader, Writer */ {
       )
       metadata.updateRemote(doc, dir)
     } catch (err) {
+      if (err.status === 409) {
+        let remoteDoc
+        try {
+          remoteDoc = await this.findDocByPath(path)
+        } catch (e) {
+          log.warn(
+            { path, err: e, originalErr: err },
+            'could not fetch conflicting directory'
+          )
+        }
+        if (remoteDoc && this.isExcludedFromSync(remoteDoc)) {
+          throw new ExcludedDirError(path)
+        }
+      }
       throw err
     }
   }
@@ -293,12 +307,30 @@ class Remote /*:: implements Reader, Writer */ {
       await this.trashAsync(overwrite)
     }
 
-    const newRemoteDoc = await this.remoteCozy.updateAttributesById(
-      remoteId,
-      attrs,
-      opts
-    )
-    metadata.updateRemote(newMetadata, newRemoteDoc)
+    try {
+      const newRemoteDoc = await this.remoteCozy.updateAttributesById(
+        remoteId,
+        attrs,
+        opts
+      )
+      metadata.updateRemote(newMetadata, newRemoteDoc)
+    } catch (err) {
+      if (err.status === 409) {
+        let remoteDoc
+        try {
+          remoteDoc = await this.findDocByPath(path)
+        } catch (e) {
+          log.warn(
+            { path, err: e, originalErr: err },
+            'could not fetch conflicting directory'
+          )
+        }
+        if (remoteDoc && this.isExcludedFromSync(remoteDoc)) {
+          throw new ExcludedDirError(path)
+        }
+      }
+      throw err
+    }
 
     if (overwrite && isOverwritingTarget) {
       try {
@@ -415,7 +447,7 @@ class Remote /*:: implements Reader, Writer */ {
     if (path === '.') return this.remoteCozy.find(ROOT_DIR_ID)
 
     const dir = await this.pouch.bySyncedPath(path)
-    if (!dir || dir.docType !== 'folder' || !dir.remote) {
+    if (!dir || dir.deleted || !dir.remote || dir.docType !== 'folder') {
       throw new DirectoryNotFound(path, this.config.cozyUrl)
     }
 
@@ -456,15 +488,16 @@ class Remote /*:: implements Reader, Writer */ {
     await this.remoteCozy.updateAttributesById(remoteDoc._id, attrs, opts)
   }
 
-  isNotSynchronizedWithClient(dir /*: MetadataRemoteDir */) /*: boolean */ {
+  isExcludedFromSync(doc /*: MetadataRemoteInfo */) /*: boolean */ {
     const {
       client: { clientID },
       flags
     } = this.config
     return (
       (flags.differentialSync || process.env.NODE_ENV === 'test') &&
-      dir.not_synchronized_on != null &&
-      dir.not_synchronized_on.find(({ id }) => id === clientID) != null
+      doc.type === 'directory' &&
+      doc.not_synchronized_on != null &&
+      doc.not_synchronized_on.find(({ id }) => id === clientID) != null
     )
   }
 }
