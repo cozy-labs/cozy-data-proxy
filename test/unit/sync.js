@@ -47,8 +47,8 @@ describe('Sync', function() {
   after('clean config directory', configHelpers.cleanConfig)
 
   beforeEach('instanciate sync', function() {
-    this.local = stubSide()
-    this.remote = stubSide()
+    this.local = stubSide('local')
+    this.remote = stubSide('remote')
     this.ignore = new Ignore(['ignored'])
     this.events = new EventEmitter()
     this.sync = new Sync(

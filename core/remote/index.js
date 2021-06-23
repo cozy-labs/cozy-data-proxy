@@ -30,6 +30,7 @@ import type Prep from '../prep'
 import type { RemoteDoc } from './document'
 import type { Reader } from '../reader'
 import type { Writer } from '../writer'
+import type { SideName } from '../side'
 
 export type RemoteOptions = {
   config: Config,
@@ -56,6 +57,7 @@ const log = logger({
  */
 class Remote /*:: implements Reader, Writer */ {
   /*::
+  name: SideName
   other: Reader & Writer
   config: Config
   pouch: Pouch
@@ -66,6 +68,7 @@ class Remote /*:: implements Reader, Writer */ {
   */
 
   constructor({ config, prep, pouch, events } /*: RemoteOptions */) {
+    this.name = 'remote'
     this.config = config
     this.pouch = pouch
     this.events = events

@@ -26,7 +26,25 @@ const EXCLUDED_DIR_CODE = 'ExcludedDir'
 const INCOMPATIBLE_DOC_CODE = 'IncompatibleDoc'
 const MISSING_PERMISSIONS_CODE = 'MissingPermissions'
 const NO_DISK_SPACE_CODE = 'NoDiskSpace'
+const UNSYNCED_PARENT_MOVE_CODE = 'UnsyncedParentMove'
 const UNKNOWN_SYNC_ERROR_CODE = 'UnknownSyncError'
+
+class UnsyncedParentMoveError extends Error {
+  /*::
+  parent: SavedMetadata
+  */
+
+  constructor(parent /*: SavedMetadata */) {
+    super('Parent move was not successfully synchronized')
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, UnsyncedParentMoveError)
+    }
+
+    this.name = 'UnsyncedParentMoveError'
+    this.parent = parent
+  }
+}
 
 class SyncError extends Error {
   /*::
@@ -107,6 +125,9 @@ const retryDelay = (err /*: RemoteError|SyncError */) /*: number */ => {
 
       case EXCLUDED_DIR_CODE:
         return 1 * SECONDS //5 * MINUTES
+
+      case UNSYNCED_PARENT_MOVE_CODE:
+        return 0 // Don't wait since the problem is solved with the parent
 
       case remoteErrors.NO_COZY_SPACE_CODE:
         return 10 * SECONDS
@@ -240,6 +261,13 @@ const wrapError = (
     return new SyncError({ sideName, err, code: MISSING_PERMISSIONS_CODE, doc })
   } else if (err.code && err.code === 'ENOSPC') {
     return new SyncError({ sideName, err, code: NO_DISK_SPACE_CODE, doc })
+  } else if (err instanceof UnsyncedParentMoveError) {
+    return new SyncError({
+      sideName,
+      err,
+      code: UNSYNCED_PARENT_MOVE_CODE,
+      doc
+    })
   } else if (err instanceof IncompatibleDocError) {
     return new SyncError({ sideName, err, code: INCOMPATIBLE_DOC_CODE, doc })
   } else if (err instanceof remoteErrors.ExcludedDirError) {
@@ -261,6 +289,8 @@ module.exports = {
   MISSING_PERMISSIONS_CODE,
   NO_DISK_SPACE_CODE,
   UNKNOWN_SYNC_ERROR_CODE,
+  UNSYNCED_PARENT_MOVE_CODE,
+  UnsyncedParentMoveError,
   SyncError,
   retryDelay,
   retry,

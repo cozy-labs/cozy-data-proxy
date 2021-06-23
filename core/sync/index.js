@@ -464,6 +464,9 @@ class Sync {
         case remoteErrors.COZY_NOT_FOUND_CODE:
           this.fatal(syncErr)
           break
+        case syncErrors.UNSYNCED_PARENT_MOVE_CODE:
+          this.updateErrors(change, syncErr)
+          break
         case syncErrors.EXCLUDED_DIR_CODE:
         case syncErrors.INCOMPATIBLE_DOC_CODE:
         case syncErrors.MISSING_PERMISSIONS_CODE:
@@ -765,6 +768,15 @@ class Sync {
     doc /*: SavedMetadata */,
     from /*: SavedMetadata */
   ) /*: Promise<void> */ {
+    const oldParentPath = dirname(from.path)
+    const newParentPath = dirname(doc.path)
+    const parent = await this.pouch.bySyncedPath(newParentPath)
+    if (parent && parent.moveFrom && parent.moveFrom.path === oldParentPath) {
+      // If the parent move was not successfully synchronized, prevent the child
+      // move synchronization by throwning a SyncError.
+      throw new syncErrors.UnsyncedParentMoveError(parent)
+    }
+
     await side.assignNewRemote(doc)
     if (doc.docType === 'file') {
       this.events.emit('transfer-move', _.clone(doc), _.clone(from))

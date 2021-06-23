@@ -38,6 +38,7 @@ import type Prep from '../prep'
 import type { Writer } from '../writer'
 import type { Callback } from '../utils/func'
 import type { Watcher } from './watcher'
+import type { SideName } from '../side'
 */
 
 const log = logger({
@@ -67,6 +68,7 @@ export type LocalOptions = {
  */
 class Local /*:: implements Reader, Writer */ {
   /*::
+  name: SideName
   prep: Prep
   pouch: Pouch
   events: EventEmitter
@@ -79,6 +81,7 @@ class Local /*:: implements Reader, Writer */ {
   */
 
   constructor(opts /*: LocalOptions */) {
+    this.name = 'local'
     this.prep = opts.prep
     this.pouch = opts.pouch
     this.events = opts.events
