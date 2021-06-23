@@ -15,6 +15,7 @@ export type { FetchError }
 const CONFLICTING_NAME_CODE = 'ConflictingName'
 const COZY_CLIENT_REVOKED_CODE = 'CozyClientRevoked'
 const COZY_NOT_FOUND_CODE = 'CozyNotFound'
+const DOCUMENT_IN_TRASH_CODE = 'DocumentInTrash'
 const INVALID_FOLDER_MOVE_CODE = 'InvalidFolderMove'
 const INVALID_METADATA_CODE = 'InvalidMetadata'
 const INVALID_NAME_CODE = 'InvalidName'
@@ -168,12 +169,20 @@ const wrapError = (err /*: FetchError |  Error */) /*: RemoteError */ => {
 
     switch (status) {
       case 400:
-        // TODO: Merge with ClientRevokedError
-        return new RemoteError({
-          code: COZY_CLIENT_REVOKED_CODE,
-          message: COZY_CLIENT_REVOKED_MESSAGE, // We'll match the message to display an error in gui/main
-          err
-        })
+        if (detail(err) === 'File or directory is already in the trash') {
+          return new RemoteError({
+            code: DOCUMENT_IN_TRASH_CODE,
+            message: 'Remote document is in the Cozy trash',
+            err
+          })
+        } else {
+          // TODO: Merge with ClientRevokedError
+          return new RemoteError({
+            code: COZY_CLIENT_REVOKED_CODE,
+            message: COZY_CLIENT_REVOKED_MESSAGE, // We'll match the message to display an error in gui/main
+            err
+          })
+        }
       case 402:
         try {
           const parsedMessage = JSON.parse(err.message)
@@ -313,6 +322,12 @@ function hasNoReason(err /*: FetchError */) /*: boolean %checks */ {
   )
 }
 
+function detail(err /*: FetchError */) /*: ?string */ {
+  const { errors } = err.reason || {}
+  const { detail } = (errors && errors[0]) || {}
+  return detail
+}
+
 module.exports = {
   CozyDocumentMissingError,
   DirectoryNotFound,
@@ -322,6 +337,7 @@ module.exports = {
   CONFLICTING_NAME_CODE,
   COZY_CLIENT_REVOKED_CODE,
   COZY_NOT_FOUND_CODE,
+  DOCUMENT_IN_TRASH_CODE,
   INVALID_FOLDER_MOVE_CODE,
   INVALID_METADATA_CODE,
   INVALID_NAME_CODE,

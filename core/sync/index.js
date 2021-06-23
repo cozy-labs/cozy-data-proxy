@@ -450,6 +450,13 @@ class Sync {
             await this.remote.resolveRemoteConflict(change.doc)
           }
           break
+        case remoteErrors.DOCUMENT_IN_TRASH_CODE:
+          delete change.doc.moveFrom
+          delete change.doc.overwrite
+          delete change.doc.remote
+
+          await this.updateRevs(change.doc, sideName)
+          break
         case remoteErrors.MISSING_DOCUMENT_CODE:
           // Don't try more than MAX_SYNC_ATTEMPTS for the same operation
           if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
