@@ -500,6 +500,18 @@ class Remote /*:: implements Reader, Writer */ {
       doc.not_synchronized_on.find(({ id }) => id === clientID) != null
     )
   }
+
+  async includeInSync(doc /*: SavedMetadata */) /*: Promise<*> */ {
+    if (doc.remote && doc.remote.type === 'directory') {
+      await this.remoteCozy.includeInSync(doc.remote)
+    } else {
+      const remoteDocs = await this.remoteCozy.search({ path: `/${doc.path}` })
+      const remoteDoc = remoteDocs[0]
+      if (!remoteDoc || remoteDoc.type !== 'directory') return
+
+      await this.remoteCozy.includeInSync(remoteDoc)
+    }
+  }
 }
 
 /** Extract the remote parent path and leaf name from a local path */

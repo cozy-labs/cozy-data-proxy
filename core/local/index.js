@@ -480,10 +480,7 @@ class Local /*:: implements Reader, Writer */ {
     doc /*: SavedMetadata */
   ) /*: Promise<SavedMetadata> */ {
     const backupPath = `${doc.path}.bck`
-    await fse.copy(
-      path.join(this.syncPath, doc.path),
-      path.join(this.syncPath, backupPath)
-    )
+    await fse.copy(this.abspath(doc.path), this.abspath(backupPath))
     const copy = _.cloneDeep(doc)
     copy.path = backupPath
     return copy
@@ -491,7 +488,7 @@ class Local /*:: implements Reader, Writer */ {
 
   async resolveConflict(newMetadata /*: SavedMetadata */) /*: Promise<void> */ {
     // Find conflicting document on local filesystem
-    const hasConflict = await fse.exists(newMetadata.path)
+    const hasConflict = await fse.exists(this.abspath(newMetadata.path))
     if (!hasConflict) return
 
     // Generate a new name with a conflict suffix for the remote document

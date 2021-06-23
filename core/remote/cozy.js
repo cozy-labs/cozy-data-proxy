@@ -9,7 +9,12 @@ const CozyClient = require('cozy-client').default
 const { FetchError } = require('cozy-stack-client')
 const path = require('path')
 
-const { FILES_DOCTYPE, FILE_TYPE, DIR_TYPE } = require('./constants')
+const {
+  FILES_DOCTYPE,
+  OAUTH_CLIENTS_DOCTYPE,
+  FILE_TYPE,
+  DIR_TYPE
+} = require('./constants')
 const { DirectoryNotFound } = require('./errors')
 const {
   dropSpecialDocs,
@@ -68,11 +73,13 @@ const log = logger({
  */
 class RemoteCozy {
   /*::
+  config: Config
   url: string
   client: OldCozyClient
   */
 
   constructor(config /*: Config */) {
+    this.config = config
     this.url = config.cozyUrl
     this.client = new OldCozyClient({
       cozyURL: this.url,
@@ -522,6 +529,16 @@ class RemoteCozy {
       data
     } = await files.addReferencedBy(doc, references)
     return { _rev, referencedBy: data }
+  }
+
+  async includeInSync(dir /*: MetadataRemoteDir */) /*: Promise<void> */ {
+    const client = await this.newClient()
+    const files = client.collection(FILES_DOCTYPE)
+    const {
+      client: { clientID }
+    } = this.config
+    const oauthClient = { _id: clientID, _type: OAUTH_CLIENTS_DOCTYPE }
+    await files.removeNotSynchronizedDirectories(oauthClient, [dir])
   }
 }
 

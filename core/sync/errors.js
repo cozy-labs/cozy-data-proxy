@@ -105,6 +105,9 @@ const retryDelay = (err /*: RemoteError|SyncError */) /*: number */ => {
       case NO_DISK_SPACE_CODE:
         return 1 * MINUTES
 
+      case EXCLUDED_DIR_CODE:
+        return 1 * SECONDS //5 * MINUTES
+
       case remoteErrors.NO_COZY_SPACE_CODE:
         return 10 * SECONDS
 
