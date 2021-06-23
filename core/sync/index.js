@@ -806,6 +806,12 @@ class Sync {
         case 'skip':
           await syncErrors.skip(cause, this)
           break
+        case 'create-conflict':
+          await syncErrors.createConflict(cause, this)
+          break
+        case 'link-directories':
+          await syncErrors.linkDirectories(cause, this)
+          break
         default:
           log.error(
             { path: cause.change && cause.change.doc.path, cmd, sentry: true },

@@ -185,6 +185,42 @@ const skip = async (
   }
 }
 
+const createConflict = async (
+  cause /*: {| err: RemoteError |} | {| err: SyncError, change: MetadataChange |} */,
+  sync /*: Sync */
+) => {
+  log.debug(cause, 'user requested conflict creation')
+
+  clearInterval(sync.retryInterval)
+
+  if (cause.change) {
+    const { change, err } = cause
+    await sync.local.resolveConflict(change.doc)
+    // Skip the local dir move since it would result in the same conflict error.
+    await sync.skipChange(change, err)
+  }
+}
+
+const linkDirectories = async (
+  cause /*: {| err: RemoteError |} | {| err: SyncError, change: MetadataChange |} */,
+  sync /*: Sync */
+) => {
+  log.debug(
+    cause,
+    'user requested directories linking (and re-inclusion in differential sync)'
+  )
+
+  clearInterval(sync.retryInterval)
+
+  if (cause.change) {
+    const { change, err } = cause
+    await sync.remote.includeInSync(change.doc)
+    // Skip the local dir addition to avoid a conflict with the re-included
+    // remote dir.
+    await sync.skipChange(change, err)
+  }
+}
+
 /* This method wraps errors caught during a Sync.apply call.
  * Those errors were most probably raised from the Local or Remote side thus
  * making a SyncError type unnecessary.
@@ -226,5 +262,7 @@ module.exports = {
   retryDelay,
   retry,
   skip,
+  createConflict,
+  linkDirectories,
   wrapError
 }
