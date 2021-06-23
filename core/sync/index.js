@@ -6,7 +6,7 @@
 const autoBind = require('auto-bind')
 const Promise = require('bluebird')
 
-const { dirname } = require('path')
+const { dirname, sep } = require('path')
 const _ = require('lodash')
 
 const { IncompatibleDocError } = require('../incompatibilities/platform')
@@ -217,6 +217,7 @@ class Sync {
   // sync
   async syncBatch() /*: Promise<void> */ {
     let seq = null
+    let change /*: MetadataChange */ = {}
     // eslint-disable-next-line no-constant-condition
     while (!this.lifecycle.willStop()) {
       await this.lifecycle.ready()
@@ -227,17 +228,264 @@ class Sync {
       try {
         seq = await this.pouch.getLocalSeq()
         // TODO: Prevent infinite loop
-        const change = await this.getNextChange(seq)
-        if (change == null) {
+        const changes = await this.getNextChanges(seq)
+        if (changes.length === 0) {
           log.debug('No more metadata changes for now')
           break
         }
 
-        this.events.emit('sync-current', change.seq)
+        const operation = async doc => {
+          const sideName = this.selectSide(doc)[1]
+          const currentRev = metadata.side(doc, sideName)
 
-        await this.apply(change)
+          if (metadata.shouldIgnore(doc, this.ignore)) {
+            return 'SKIP'
+          } else if (!metadata.wasSynced(doc) && isMarkedForDeletion(doc)) {
+            return 'SKIP'
+          } else if (isMarkedForDeletion(doc) && currentRev === 0) {
+            return 'NULL'
+          } else if (doc.moveTo != null) {
+            return 'MOVE_SRC'
+          } else if (doc.moveFrom != null) {
+            const from = (doc.moveFrom /*: SavedMetadata */)
+
+            if (from.incompatibilities && sideName === 'local') {
+              return 'ADD'
+            } else {
+              return 'MOVE_DST' // XXX: can be move with update but we don't care for now
+            }
+          } else if (isMarkedForDeletion(doc)) {
+            return 'DEL'
+          } else if (currentRev === 0) {
+            return 'ADD'
+          } else {
+            try {
+              const old = (await this.pouch.getPreviousRev(
+                doc._id,
+                doc.sides.target - currentRev
+              ) /*: ?SavedMetadata */)
+
+              if (
+                old &&
+                doc.docType === 'file' &&
+                metadata.sameFile(old, doc)
+              ) {
+                return 'NULL'
+              } else {
+                return 'EDIT'
+              }
+            } catch (err) {
+              return 'EDIT'
+            }
+          }
+        }
+
+        for (const change of changes) {
+          change.operation = await operation(change.doc)
+        }
+
+        // FIXME: sorting changes is probably not the best way to make sure
+        // changes dependent on others changes are propagated last.
+        // Prefer building a dependency graph instead.
+        changes.sort(
+          ({ operation: opA, doc: docA }, { operation: opB, doc: docB }) => {
+            if (opA === opB) {
+              // Handle same operation parent change before child changes
+              if (docB.path.startsWith(docA.path + sep)) return -1
+              else if (docA.path.startsWith(docB.path + sep)) return 1
+              return 0
+            }
+
+            return 0
+          }
+        )
+
+        let prevSeq = seq
+        for (let i = 0; i < changes.length; i++) {
+          change = changes[i]
+          if (change.seq < prevSeq) {
+            // reschedule change if dependent on another one
+            metadata.incSides(change.doc)
+            await this.pouch.put(change.doc)
+            changes.splice(i, 1)
+            i--
+          } else {
+            prevSeq = change.seq
+            await this.apply(change)
+          }
+        }
       } catch (err) {
-        if (!this.lifecycle.willStop()) throw err
+        if (
+          !(err instanceof syncErrors.SyncError) ||
+          !this.lifecycle.willStop()
+        )
+          throw err
+
+        const {
+          sideName,
+          doc: { path }
+        } = err
+
+        if (
+          [
+            remoteErrors.INVALID_FOLDER_MOVE_CODE,
+            remoteErrors.INVALID_METADATA_CODE,
+            remoteErrors.MISSING_DOCUMENT_CODE,
+            remoteErrors.UNKNOWN_INVALID_DATA_ERROR_CODE,
+            remoteErrors.UNKNOWN_REMOTE_ERROR_CODE
+          ].includes(err.code)
+        ) {
+          log.error(
+            { err, change, path, sentry: true },
+            `Sync error: ${err.message}`
+          )
+        } else {
+          log.warn({ err, change, path }, `Sync error: ${err.message}`)
+        }
+        switch (err.code) {
+          case remoteErrors.COZY_NOT_FOUND_CODE:
+            this.fatal(err)
+            break
+          case syncErrors.INCOMPATIBLE_DOC_CODE:
+          case syncErrors.MISSING_PERMISSIONS_CODE:
+          case syncErrors.NO_DISK_SPACE_CODE:
+          case remoteErrors.INVALID_FOLDER_MOVE_CODE:
+          case remoteErrors.INVALID_METADATA_CODE:
+          case remoteErrors.INVALID_NAME_CODE:
+          case remoteErrors.NEEDS_REMOTE_MERGE_CODE:
+          case remoteErrors.NO_COZY_SPACE_CODE:
+          case remoteErrors.PATH_TOO_DEEP_CODE:
+          case remoteErrors.UNKNOWN_INVALID_DATA_ERROR_CODE:
+          case remoteErrors.UNKNOWN_REMOTE_ERROR_CODE:
+          case remoteErrors.UNREACHABLE_COZY_CODE:
+          case remoteErrors.USER_ACTION_REQUIRED_CODE:
+            // We will keep retrying to apply the change until it's fixed or the
+            // user contacts our support.
+            // See `default` case for other blocking errors for which we'll stop
+            // retrying after 3 failed attempts.
+            this.blockSyncFor({ err, change })
+            break
+          case remoteErrors.CONFLICTING_NAME_CODE:
+            /* When we fail to apply a change because of a name conflict on the
+             * remote Cozy, it means we either:
+             * 1. have another change to apply that will free the give name by
+             *    moving the document or renaming it
+             * 2. have not yet merged the remote change that took the name and
+             *    would have generated a conflict copy
+             * 3. have not merged the remote change that took the name and never
+             *    will because we abandoned that change in the past
+             *
+             * We can solve 1. by marking our local change with an increased
+             * error counter so it can be retried later, after we've applied the
+             * other changes that would free the conflicting name.
+             *
+             * We can solve 2. by blocking the Sync process until we've fetched
+             * and merged the new remote changes, thus generating a conflict
+             * copy at the Merge level.
+             *
+             * We can only solve 3. by detecting that we've tried the solutions
+             * to 1. and 2., still can't apply the given change and thus generate
+             * a remote conflict at the Sync level instead of doing it at the
+             * Merge level.
+             */
+
+            if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
+              // Solve 1. & 2.
+              // We will retry to apply the change `MAX_SYNC_ATTEMPTS` times just
+              // in case.
+              this.blockSyncFor({ err, change })
+            } else {
+              log.error(
+                { path, err, change },
+                'Document already exists on Cozy'
+              )
+              // Solve 3.
+              // We resolve the conflict on the remote Cozy to avoid local
+              // issues like permission issues on Windows.
+              await this.remote.resolveRemoteConflict(change.doc)
+            }
+            break
+          case remoteErrors.DOCUMENT_IN_TRASH_CODE:
+            delete change.doc.moveFrom
+            delete change.doc.overwrite
+            delete change.doc.remote
+
+            await this.updateRevs(change.doc, sideName)
+            break
+          case remoteErrors.MISSING_DOCUMENT_CODE:
+            // Don't try more than MAX_SYNC_ATTEMPTS for the same operation
+            if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
+              this.blockSyncFor({ err, change })
+            } else {
+              if (change.doc.deleted) {
+                await this.skipChange(change, err)
+              } else if (sideName === 'remote') {
+                delete change.doc.moveFrom
+                delete change.doc.overwrite
+                delete change.doc.remote
+
+                await this.doAdd(this.remote, change.doc)
+                await this.updateRevs(change.doc, 'remote')
+              } else {
+                await this.pouch.eraseDocument(change.doc)
+                if (change.doc.docType === 'file') {
+                  this.events.emit('delete-file', _.clone(change.doc))
+                }
+              }
+            }
+            break
+          case remoteErrors.MISSING_PARENT_CODE:
+            /* When we fail to apply a change because its parent does not exist on
+             * the remote Cozy, it means we either:
+             * 1. have another change to apply that will create that parent
+             * 2. have not yet merged the remote change that removed that parent
+             * 3. have failed to sync the creation of the parent and will never
+             *    succeed because we abandoned in the past
+             * 4. have failed to merge its remote deletion and will never succeed
+             *    because we abandoned in the past
+             */
+            if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
+              // Solve 1. & 2.
+              this.blockSyncFor({ err, change })
+            } else {
+              log.error(
+                { path, err, change },
+                'Parent directory is missing on Cozy'
+              )
+              const parent = await this.pouch.bySyncedPath(dirname(path))
+              if (!parent) {
+                // Solve 3.
+                // This is a weird situation where we don't have a parent in
+                // PouchDB. This should never be the case though.
+                log.error(
+                  { path, err, change, sentry: true },
+                  'Parent directory could not be found either on Cozy or PouchDB. Abandoning.'
+                )
+                this.skipChange(change, err)
+              } else if (parent.remote) {
+                // We're in a fishy situation where we have a folder whose synced
+                // path is the parent path of our document but its remote path is
+                // not and the synchronization did not change this.
+                // The database is corrupted and should be cleaned up.
+                log.error(
+                  { path, err, change, sentry: true },
+                  'Parent directory is desynchronized. Abandoning.'
+                )
+                this.skipChange(change, err)
+              } else {
+                // Solve 3. or 4.
+                await this.remote.addFolderAsync(parent)
+              }
+            }
+            break
+          default:
+            // Don't try more than MAX_SYNC_ATTEMPTS for the same operation
+            if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
+              this.blockSyncFor({ err, change })
+            } else {
+              await this.skipChange(change, err)
+            }
+        }
       } finally {
         release()
       }
@@ -248,19 +496,19 @@ class Sync {
   //
   // Note: it is difficult to pick only one change at a time because pouch can
   // emit several docs in a row, and `limit: 1` seems to be not effective!
-  async baseChangeOptions(seq /*: number */) /*: Object */ {
+  baseChangeOptions(seq /*: number */) /*: Object */ {
     return {
       limit: 1,
       since: seq,
       filter: '_view',
       view: 'byPath',
-      returnDocs: false
+      return_docs: false
     }
   }
 
   async waitForNewChanges(seq /*: number */) {
     log.trace({ seq }, 'Waiting for changes since seq')
-    const opts = await this.baseChangeOptions(seq)
+    const opts = this.baseChangeOptions(seq)
     opts.live = true
     return new Promise((resolve, reject) => {
       this.lifecycle.once('will-stop', resolve)
@@ -285,17 +533,36 @@ class Sync {
     })
   }
 
-  async getNextChange(seq /*: number */) /*: Promise<?MetadataChange> */ {
-    const stopMeasure = measureTime('Sync#getNextChange')
-    const opts = await this.baseChangeOptions(seq)
-    opts.include_docs = true
+  async getNextChanges(seq /*: number */) /*: Promise<?MetadataChange[]> */ {
+    const stopMeasure = measureTime('Sync#getNextChanges')
+    const opts = {
+      ...this.baseChangeOptions(seq),
+      include_docs: true,
+      limit: null
+    }
     const p = new Promise((resolve, reject) => {
+      const changes = []
+
       this.lifecycle.once('will-stop', resolve)
       this.changes = this.pouch.db
         .changes(opts)
-        .on('change', data => {
+        .on('change', async data => {
           this.lifecycle.off('will-stop', resolve)
-          resolve(data)
+          if (
+            changes.length === 0 &&
+            metadata.shouldIgnore(data.doc, this.ignore)
+          ) {
+            await this.pouch.setLocalSeq(data.seq)
+          } else if (
+            changes.length === 0 &&
+            metadata.isUpToDate('local', data.doc) &&
+            metadata.isUpToDate('remote', data.doc)
+          ) {
+            log.info({ path: data.doc.path }, 'up to date')
+            await this.pouch.setLocalSeq(data.seq)
+          } else {
+            changes.push(data)
+          }
         })
         .on('error', err => {
           this.lifecycle.off('will-stop', resolve)
@@ -304,7 +571,7 @@ class Sync {
         .on('complete', data => {
           this.lifecycle.off('will-stop', resolve)
           if (data.results == null || data.results.length === 0) {
-            resolve(null)
+            resolve(changes)
           }
         })
     })
@@ -316,28 +583,28 @@ class Sync {
   // At least one side should say it has already this change
   // In some cases, both sides have the change
   async apply(change /*: MetadataChange */) /*: Promise<void> */ {
-    let { doc, seq } = change
-    const { path } = doc
-    log.debug({ path, seq, doc }, `Applying change ${seq}...`)
-
-    if (metadata.shouldIgnore(doc, this.ignore)) {
-      return this.pouch.setLocalSeq(change.seq)
-    } else if (!metadata.wasSynced(doc) && isMarkedForDeletion(doc)) {
-      await this.pouch.eraseDocument(doc)
-      if (doc.docType === 'file') {
-        this.events.emit('delete-file', _.clone(doc))
-      }
-      return this.pouch.setLocalSeq(change.seq)
-    }
-
-    const [side, sideName] = this.selectSide(doc)
     let stopMeasure = () => {}
     try {
+      this.events.emit('sync-current', change.seq)
+
+      let { doc, seq } = change
+      const { path } = doc
+      log.debug({ path, seq, doc }, `Applying change ${seq}...`)
+
+      if (metadata.shouldIgnore(doc, this.ignore)) {
+        return
+      } else if (!metadata.wasSynced(doc) && isMarkedForDeletion(doc)) {
+        await this.pouch.setLocalSeq(change.seq)
+        if (doc.docType === 'file') {
+          this.events.emit('delete-file', _.clone(doc))
+        }
+      }
+
+      const [side, sideName] = this.selectSide(doc)
       stopMeasure = measureTime('Sync#applyChange:' + sideName)
 
       if (!side) {
-        log.info({ path }, 'up to date')
-        return this.pouch.setLocalSeq(change.seq)
+        await this.pouch.setLocalSeq(change.seq)
       } else if (sideName === 'remote' && doc.trashed) {
         // File or folder was just deleted locally
         const byItself = await this.trashWithParentOrByItself(doc, side)
@@ -345,7 +612,14 @@ class Sync {
           return
         }
       } else {
-        await this.applyDoc(doc, side, sideName)
+        try {
+          await this.applyDoc(doc, side, sideName)
+        } catch (err) {
+          // XXX: We process the error directly here because our tests call
+          // `apply()` and some expect `updateErrors` to be called (e.g. when
+          // applying a move with a failing content change).
+          throw syncErrors.wrapError(err, sideName, change)
+        }
       }
 
       await this.pouch.setLocalSeq(change.seq)
@@ -364,172 +638,6 @@ class Sync {
         delete doc.overwrite
         // We also update the sides in case the document is not erased
         await this.updateRevs(doc, sideName)
-      }
-    } catch (err) {
-      // XXX: We process the error directly here because our tests call
-      // `apply()` and some expect `updateErrors` to be called (e.g. when
-      // applying a move with a failing content change).
-      const syncErr = syncErrors.wrapError(err, sideName, change)
-      if (
-        [
-          remoteErrors.INVALID_FOLDER_MOVE_CODE,
-          remoteErrors.INVALID_METADATA_CODE,
-          remoteErrors.MISSING_DOCUMENT_CODE,
-          remoteErrors.UNKNOWN_INVALID_DATA_ERROR_CODE,
-          remoteErrors.UNKNOWN_REMOTE_ERROR_CODE
-        ].includes(syncErr.code)
-      ) {
-        log.error(
-          { err: syncErr, change, path, sentry: true },
-          `Sync error: ${syncErr.message}`
-        )
-      } else {
-        log.warn(
-          { err: syncErr, change, path },
-          `Sync error: ${syncErr.message}`
-        )
-      }
-      switch (syncErr.code) {
-        case remoteErrors.COZY_NOT_FOUND_CODE:
-          this.fatal(syncErr)
-          break
-        case syncErrors.INCOMPATIBLE_DOC_CODE:
-        case syncErrors.MISSING_PERMISSIONS_CODE:
-        case syncErrors.NO_DISK_SPACE_CODE:
-        case remoteErrors.INVALID_FOLDER_MOVE_CODE:
-        case remoteErrors.INVALID_METADATA_CODE:
-        case remoteErrors.INVALID_NAME_CODE:
-        case remoteErrors.NEEDS_REMOTE_MERGE_CODE:
-        case remoteErrors.NO_COZY_SPACE_CODE:
-        case remoteErrors.PATH_TOO_DEEP_CODE:
-        case remoteErrors.UNKNOWN_INVALID_DATA_ERROR_CODE:
-        case remoteErrors.UNKNOWN_REMOTE_ERROR_CODE:
-        case remoteErrors.UNREACHABLE_COZY_CODE:
-        case remoteErrors.USER_ACTION_REQUIRED_CODE:
-          // We will keep retrying to apply the change until it's fixed or the
-          // user contacts our support.
-          // See `default` case for other blocking errors for which we'll stop
-          // retrying after 3 failed attempts.
-          this.blockSyncFor({ err: syncErr, change })
-          break
-        case remoteErrors.CONFLICTING_NAME_CODE:
-          /* When we fail to apply a change because of a name conflict on the
-           * remote Cozy, it means we either:
-           * 1. have another change to apply that will free the give name by
-           *    moving the document or renaming it
-           * 2. have not yet merged the remote change that took the name and
-           *    would have generated a conflict copy
-           * 3. have not merged the remote change that took the name and never
-           *    will because we abandoned that change in the past
-           *
-           * We can solve 1. by marking our local change with an increased
-           * error counter so it can be retried later, after we've applied the
-           * other changes that would free the conflicting name.
-           *
-           * We can solve 2. by blocking the Sync process until we've fetched
-           * and merged the new remote changes, thus generating a conflict
-           * copy at the Merge level.
-           *
-           * We can only solve 3. by detecting that we've tried the solutions
-           * to 1. and 2., still can't apply the given change and thus generate
-           * a remote conflict at the Sync level instead of doing it at the
-           * Merge level.
-           */
-
-          // We will retry to apply the change `MAX_SYNC_ATTEMPTS` times just
-          // in case.
-          if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
-            // Solve 1. & 2.
-            this.blockSyncFor({ err: syncErr, change })
-          } else {
-            log.error(
-              { path, err: syncErr, change },
-              'Document already exists on Cozy'
-            )
-            // Solve 3.
-            await this.remote.resolveRemoteConflict(change.doc)
-          }
-          break
-        case remoteErrors.DOCUMENT_IN_TRASH_CODE:
-          delete change.doc.moveFrom
-          delete change.doc.overwrite
-          delete change.doc.remote
-
-          await this.updateRevs(change.doc, sideName)
-          break
-        case remoteErrors.MISSING_DOCUMENT_CODE:
-          // Don't try more than MAX_SYNC_ATTEMPTS for the same operation
-          if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
-            this.blockSyncFor({ err: syncErr, change })
-          } else {
-            if (change.doc.deleted) {
-              await this.skipChange(change, syncErr)
-            } else if (sideName === 'remote') {
-              delete change.doc.moveFrom
-              delete change.doc.overwrite
-              delete change.doc.remote
-
-              await this.doAdd(this.remote, change.doc)
-              await this.updateRevs(change.doc, 'remote')
-            } else {
-              await this.pouch.eraseDocument(change.doc)
-              if (doc.docType === 'file') {
-                this.events.emit('delete-file', _.clone(change.doc))
-              }
-            }
-          }
-          break
-        case remoteErrors.MISSING_PARENT_CODE:
-          /* When we fail to apply a change because its parent does not exist on
-           * the remote Cozy, it means we either:
-           * 1. have another change to apply that will create that parent
-           * 2. have not yet merged the remote change that removed that parent
-           * 3. have failed to sync the creation of the parent and will never
-           *    succeed because we abandoned in the past
-           * 4. have failed to merge its remote deletion and will never succeed
-           *    because we abandoned in the past
-           */
-          if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
-            // Solve 1. & 2.
-            this.blockSyncFor({ err: syncErr, change })
-          } else {
-            log.error(
-              { path, err: syncErr, change },
-              'Parent directory is missing on Cozy'
-            )
-            const parent = await this.pouch.bySyncedPath(dirname(path))
-            if (!parent) {
-              // Solve 3.
-              // This is a weird situation where we don't have a parent in
-              // PouchDB. This should never be the case though.
-              log.error(
-                { path, err: syncErr, change, sentry: true },
-                'Parent directory could not be found either on Cozy or PouchDB. Abandoning.'
-              )
-              this.skipChange(change, syncErr)
-            } else if (parent.remote) {
-              // We're in a fishy situation where we have a folder whose synced
-              // path is the parent path of our document but its remote path is
-              // not and the synchronization did not change this.
-              // The database is corrupted and should be cleaned up.
-              log.error(
-                { path, err: syncErr, change, sentry: true },
-                'Parent directory is desynchronized. Abandoning.'
-              )
-              this.skipChange(change, syncErr)
-            } else {
-              // Solve 3. or 4.
-              await this.remote.addFolderAsync(parent)
-            }
-          }
-          break
-        default:
-          // Don't try more than MAX_SYNC_ATTEMPTS for the same operation
-          if (!change.doc.errors || change.doc.errors < MAX_SYNC_ATTEMPTS) {
-            this.blockSyncFor({ err: syncErr, change })
-          } else {
-            await this.skipChange(change, syncErr)
-          }
       }
     } finally {
       stopMeasure()
@@ -874,7 +982,7 @@ class Sync {
       },
       `Failed to sync ${errors + 1} times. Giving up.`
     )
-    return await this.pouch.setLocalSeq(change.seq)
+    await this.pouch.setLocalSeq(change.seq)
   }
 
   // Update rev numbers for both local and remote sides
