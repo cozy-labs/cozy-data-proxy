@@ -30,6 +30,7 @@ import type { SavedMetadata } from '../metadata'
 import type { SideName } from '../side'
 import type { Writer } from '../writer'
 import type { SyncError } from './errors'
+import type { UserActionCommand } from '../syncstate'
 */
 
 const log = logger({
@@ -785,50 +786,6 @@ class Sync {
 
     this.lifecycle.blockFor(err.code)
 
-    const retryDelay = syncErrors.retryDelay(err)
-
-    const retry = async () => {
-      this.events.off('user-action-done', retry)
-      this.events.off('user-action-inprogress', waitBeforeRetry)
-      this.events.off('user-action-skipped', skip)
-
-      log.debug(cause, 'retrying after blocking error')
-
-      if (err.code === remoteErrors.UNREACHABLE_COZY_CODE) {
-        // We could simply fetch the remote changes but it could take time
-        // before we're done fetching them and we want to notify the GUI we're
-        // back online as soon as possible.
-        if (await this.remote.ping()) {
-          this.events.emit('online')
-        } else {
-          this.events.emit('offline')
-          // $FlowFixMe intervals have a refresh() method starting with Node v10
-          if (this.retryInterval) this.retryInterval.refresh()
-          // We're still offline so no need to try fetching changes or
-          // synchronizing.
-          return
-        }
-      }
-
-      clearInterval(this.retryInterval)
-
-      if (cause.change) {
-        // We increment the record's errors counter to keep track of the
-        // retries and above all, save any changes made to the record by
-        // `applyDoc()` and such (e.g. when applying a file move with update,
-        // if the update fails, we want to remove the `moveFrom` attribute to
-        // avoid re-applying the move which was already applied).
-        await this.updateErrors(cause.change, cause.err)
-      }
-
-      // Await to make sure we've fetched potential remote changes
-      if (this.remote.watcher && !this.remote.watcher.running) {
-        await this.remote.watcher.start()
-      }
-
-      this.lifecycle.unblockFor(err.code)
-    }
-
     const waitBeforeRetry = () => {
       // The user is currently doing the required action so we postpone the next
       // retry up to `retryDelay` to give the user enough time to complete the
@@ -836,22 +793,25 @@ class Sync {
       // $FlowFixMe intervals have a refresh() method starting with Node v10
       if (this.retryInterval) this.retryInterval.refresh()
     }
-
-    const skip = async () => {
-      this.events.off('user-action-done', retry)
+    const executeCommand = async (
+      { cmd } /*: { cmd: UserActionCommand } */
+    ) => {
       this.events.off('user-action-inprogress', waitBeforeRetry)
-      this.events.off('user-action-skipped', skip)
+      this.events.off('user-action-command', executeCommand)
 
-      log.debug(cause, 'user skipped required action')
-
-      clearInterval(this.retryInterval)
-
-      if (cause.change) {
-        await this.skipChange(cause.change, cause.err)
-      }
-
-      if (!this.remote.watcher.running) {
-        await this.remote.watcher.start()
+      switch (cmd) {
+        case 'retry':
+          await syncErrors.retry(cause, this)
+          break
+        case 'skip':
+          await syncErrors.skip(cause, this)
+          break
+        default:
+          log.error(
+            { path: cause.change && cause.change.doc.path, cmd, sentry: true },
+            'received invalid user action command'
+          )
+          await syncErrors.retry(cause, this)
       }
 
       this.lifecycle.unblockFor(err.code)
@@ -860,12 +820,14 @@ class Sync {
     // Clear any existing interval since we'll replace it
     clearInterval(this.retryInterval)
     // We'll automatically retry to sync the change after a delay
-    this.retryInterval = setInterval(retry, retryDelay)
+    const retryDelay = syncErrors.retryDelay(err)
+    this.retryInterval = setInterval(
+      executeCommand.bind(this, { cmd: 'retry' }),
+      retryDelay
+    )
 
-    //this.events.once('user-action-inprogress', retry)
-    this.events.once('user-action-done', retry)
     this.events.once('user-action-inprogress', waitBeforeRetry)
-    this.events.once('user-action-skipped', skip)
+    this.events.once('user-action-command', executeCommand)
 
     // In case the error comes from the RemoteWatcher and not a change
     // application, we stop the watcher to avoid more errors.

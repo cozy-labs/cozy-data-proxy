@@ -1,13 +1,12 @@
 port module Data.UserAction exposing
-    ( EncodedUserAction
+    ( Command(..)
+    , EncodedUserAction
     , Msg(..)
     , UserAction(..)
     , decode
-    , encode
-    , end
     , same
+    , sendCommand
     , showDetails
-    , skip
     , start
     , view
     )
@@ -41,6 +40,17 @@ type alias RemoteActionInfo =
     { status : UserActionStatus, link : String }
 
 
+type Command
+    = GiveUp
+    | Retry
+    | ShowDetails
+
+
+type Msg
+    = SendCommand Command UserAction -- send specified command to client
+    | ShowInParent Path -- open file explorer at parent's path
+
+
 same : UserAction -> UserAction -> Bool
 same actionA actionB =
     case ( actionA, actionB ) of
@@ -61,33 +71,30 @@ same actionA actionB =
 port userActionDetails : EncodedUserAction -> Cmd msg
 
 
-port userActionDone : EncodedUserAction -> Cmd msg
-
-
 port userActionInProgress : EncodedUserAction -> Cmd msg
 
 
-port userActionSkipped : EncodedUserAction -> Cmd msg
+port userActionCommand : ( EncodedCommand, EncodedUserAction ) -> Cmd msg
 
 
 showDetails : UserAction -> Cmd msg
 showDetails action =
-    userActionDetails (encode action)
-
-
-end : UserAction -> Cmd msg
-end action =
-    userActionDone (encode action)
+    userActionDetails (encodeAction action)
 
 
 start : UserAction -> Cmd msg
 start action =
-    userActionInProgress (encode action)
+    userActionInProgress (encodeAction action)
 
 
-skip : UserAction -> Cmd msg
-skip action =
-    userActionSkipped (encode action)
+sendCommand : Command -> UserAction -> Cmd msg
+sendCommand cmd action =
+    case cmd of
+        ShowDetails ->
+            showDetails action
+
+        _ ->
+            userActionCommand ( encodeCommand cmd, encodeAction action )
 
 
 type alias EncodedUserAction =
@@ -104,6 +111,10 @@ type alias EncodedUserAction =
             { self : String
             }
     }
+
+
+type alias EncodedCommand =
+    String
 
 
 decode : EncodedUserAction -> Maybe UserAction
@@ -123,8 +134,8 @@ decode { seq, status, code, doc, links } =
             Nothing
 
 
-encode : UserAction -> EncodedUserAction
-encode action =
+encodeAction : UserAction -> EncodedUserAction
+encodeAction action =
     case action of
         ClientAction code a ->
             { seq = Just a.seq
@@ -141,6 +152,19 @@ encode action =
             , links = Just { self = a.link }
             , doc = Nothing
             }
+
+
+encodeCommand : Command -> EncodedCommand
+encodeCommand cmd =
+    case cmd of
+        GiveUp ->
+            "skip"
+
+        Retry ->
+            "retry"
+
+        ShowDetails ->
+            "show-details"
 
 
 decodeUserActionStatus : String -> UserActionStatus
@@ -171,13 +195,6 @@ encodeUserActionStatus status =
 
 
 -- View User Action from other modules
-
-
-type Msg
-    = GiveUp UserAction
-    | Retry UserAction
-    | ShowDetails UserAction
-    | ShowInParent Path
 
 
 type alias UserActionView =
@@ -218,8 +235,8 @@ viewByCode helpers action =
                 , "Error Try renaming it on your Cozy without using special characters and choose a shorter name if necessary."
                 ]
             , buttons =
-                [ actionButton helpers (ShowDetails action) "UserAction Show details" Secondary
-                , actionButton helpers (Retry action) "UserAction Retry" Primary
+                [ actionButton helpers (SendCommand ShowDetails action) "UserAction Show details" Secondary
+                , actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary
                 ]
             }
 
@@ -234,7 +251,7 @@ viewByCode helpers action =
                 , "Error This message persists if the local metadata of your document is corrupted. In this case try to move it out of the Cozy Drive folder and back again or contact support for help on the procedure."
                 ]
             , buttons =
-                [ actionButton helpers (Retry action) "UserAction Retry" Primary
+                [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary
                 ]
             }
 
@@ -248,7 +265,7 @@ viewByCode helpers action =
                 [ Locale.interpolate [ localDocType, path ] "Error The {0} `{1}`'s name contains characters forbidden by your Cozy."
                 , "Error Try renaming it without using the following characters: / \\u{0000} \\n \\u{000D}."
                 ]
-            , buttons = [ actionButton helpers (Retry action) "UserAction Retry" Primary ]
+            , buttons = [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary ]
             }
 
         ClientAction "MissingPermissions" { docType, path } ->
@@ -261,7 +278,7 @@ viewByCode helpers action =
                 [ Locale.interpolate [ localDocType, path ] "Error The {0} `{1}` could not be updated on your computer to apply the changes made on your Cozy."
                 , "Error Synchronization will resume as soon as you close the opened file(s) blocking this operation or restore sufficient access rights."
                 ]
-            , buttons = [ actionButton helpers (Retry action) "UserAction Retry" Primary ]
+            , buttons = [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary ]
             }
 
         ClientAction "NeedsRemoteMerge" { docType, path } ->
@@ -275,8 +292,8 @@ viewByCode helpers action =
                 , "Error This message persists if Cozy is unable to resolve this conflict. In this case rename the version you want to keep and click on \"Give up\"."
                 ]
             , buttons =
-                [ actionButton helpers (GiveUp action) "UserAction Give up" SecondaryWithDanger
-                , actionButton helpers (Retry action) "UserAction Retry" Primary
+                [ actionButton helpers (SendCommand GiveUp action) "UserAction Give up" SecondaryWithDanger
+                , actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary
                 ]
             }
 
@@ -290,7 +307,7 @@ viewByCode helpers action =
                 [ Locale.interpolate [ localDocType, path ] "Error The {0} `{1}` could not be written to your Cozy's disk because its maximum storage capacity has been reached."
                 , "Error Synchronization will resume as soon as you have freed up space (emptied your Trash, deleted unnecessary files...), or increased its capacity."
                 ]
-            , buttons = [ actionButton helpers (Retry action) "UserAction Retry" Primary ] -- Could show link to buy more disk space
+            , buttons = [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary ] -- Could show link to buy more disk space
             }
 
         ClientAction "NoDiskSpace" { docType, path } ->
@@ -303,7 +320,7 @@ viewByCode helpers action =
                 [ Locale.interpolate [ localDocType, path ] "Error The {0} `{1}` could not be written to your computer disk because there is not enough space available."
                 , "Error Synchronization will resume as soon as you have freed up space (emptied your Trash, deleted unnecessary files…)."
                 ]
-            , buttons = [ actionButton helpers (Retry action) "UserAction Retry" Primary ]
+            , buttons = [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary ]
             }
 
         ClientAction "PathTooDeep" { docType, path } ->
@@ -316,7 +333,7 @@ viewByCode helpers action =
                 [ Locale.interpolate [ localDocType, path ] "Error The {0} `{1}`'s path has too many levels (i.e. parent folders) for your Cozy."
                 , "Error Try removing some parent levels or moving it to antoher folder."
                 ]
-            , buttons = [ actionButton helpers (Retry action) "UserAction Retry" Primary ]
+            , buttons = [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary ]
             }
 
         ClientAction "UnknownRemoteError" { docType, path } ->
@@ -329,7 +346,7 @@ viewByCode helpers action =
                 [ Locale.interpolate [ localDocType, path ] "Error We encountered an unhandled error while trying to synchronise the {0} `{1}`."
                 , "Error Please contact our support to get help."
                 ]
-            , buttons = [ actionButton helpers (Retry action) "UserAction Retry" Primary ] -- Could show help button
+            , buttons = [ actionButton helpers (SendCommand Retry action) "UserAction Retry" Primary ] -- Could show help button
             }
 
         RemoteAction "UserActionRequired" { link } ->
@@ -339,7 +356,7 @@ viewByCode helpers action =
                 , "CGUUpdated Their acceptance is required to continue using your Cozy."
                 ]
             , buttons =
-                [ actionButton helpers (Retry action) "UserAction Ok" Secondary
+                [ actionButton helpers (SendCommand Retry action) "UserAction Ok" Secondary
                 , linkButton helpers link "CGUUpdated Read the new ToS" Primary
                 ]
             }

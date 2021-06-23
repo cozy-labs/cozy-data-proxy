@@ -9,6 +9,9 @@ const deepDiff = require('deep-diff').diff
 
 /*::
 type UserActionStatus = 'Required'|'InProgress'
+export type UserActionCommand =
+  | 'retry'
+  | 'skip'
 export type UserAction = {
   seq: ?number,
   code: string,
