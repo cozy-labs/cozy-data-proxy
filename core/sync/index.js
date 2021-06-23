@@ -6,7 +6,7 @@
 const autoBind = require('auto-bind')
 const Promise = require('bluebird')
 
-const { dirname } = require('path')
+const { dirname, sep } = require('path')
 const _ = require('lodash')
 
 const { IncompatibleDocError } = require('../incompatibilities/platform')
@@ -227,15 +227,80 @@ class Sync {
       try {
         seq = await this.pouch.getLocalSeq()
         // TODO: Prevent infinite loop
-        const change = await this.getNextChange(seq)
-        if (change == null) {
+        const changes = await this.getNextChanges(seq)
+        if (changes.length === 0) {
           log.debug('No more metadata changes for now')
           break
         }
 
-        this.events.emit('sync-current', change.seq)
+        const operation = async doc => {
+          const sideName = this.selectSide(doc)[1]
+          const currentRev = metadata.side(doc, sideName)
 
-        await this.apply(change)
+          if (isMarkedForDeletion(doc) && currentRev === 0) {
+            return 'NULL'
+          } else if (doc.moveTo != null) {
+            return 'MOVE_SRC'
+          } else if (doc.moveFrom != null) {
+            const from = (doc.moveFrom /*: SavedMetadata */)
+
+            if (from.incompatibilities && sideName === 'local') {
+              return 'ADD'
+            } else {
+              return 'MOVE_DST' // XXX: can be move with update but we don't care for now
+            }
+          } else if (isMarkedForDeletion(doc)) {
+            return 'DEL'
+          } else if (currentRev === 0) {
+            return 'ADD'
+          } else {
+            try {
+              const old = (await this.pouch.getPreviousRev(
+                doc._id,
+                doc.sides.target - currentRev
+              ) /*: ?SavedMetadata */)
+
+              if (
+                old &&
+                doc.docType === 'file' &&
+                metadata.sameFile(old, doc)
+              ) {
+                return 'NULL'
+              } else {
+                return 'EDIT'
+              }
+            } catch (err) {
+              return 'EDIT'
+            }
+          }
+        }
+
+        for (const change of changes) {
+          change.operation = await operation(change.doc)
+        }
+
+        // FIXME: sorting changes is probably not the best way to make sure
+        // changes dependent on others changes are propagated last.
+        // Prefer building a dependency graph instead.
+        changes.sort(
+          ({ operation: opA, doc: docA }, { operation: opB, doc: docB }) => {
+            if (opA === opB) {
+              let result
+              // Handle same operation parent change before child changes
+              if (docB.path.startsWith(docA.path + sep)) result = -1
+              else if (docA.path.startsWith(docB.path + sep)) result = 1
+              else result = 0
+              return result
+            }
+
+            return 0
+          }
+        )
+
+        for (const change of changes) {
+          this.events.emit('sync-current', change.seq)
+          await this.apply(change)
+        }
       } catch (err) {
         if (!this.lifecycle.willStop()) throw err
       } finally {
@@ -248,19 +313,19 @@ class Sync {
   //
   // Note: it is difficult to pick only one change at a time because pouch can
   // emit several docs in a row, and `limit: 1` seems to be not effective!
-  async baseChangeOptions(seq /*: number */) /*: Object */ {
+  baseChangeOptions(seq /*: number */) /*: Object */ {
     return {
       limit: 1,
       since: seq,
       filter: '_view',
       view: 'byPath',
-      returnDocs: false
+      return_docs: false
     }
   }
 
   async waitForNewChanges(seq /*: number */) {
     log.trace({ seq }, 'Waiting for changes since seq')
-    const opts = await this.baseChangeOptions(seq)
+    const opts = this.baseChangeOptions(seq)
     opts.live = true
     return new Promise((resolve, reject) => {
       this.lifecycle.once('will-stop', resolve)
@@ -285,17 +350,22 @@ class Sync {
     })
   }
 
-  async getNextChange(seq /*: number */) /*: Promise<?MetadataChange> */ {
-    const stopMeasure = measureTime('Sync#getNextChange')
-    const opts = await this.baseChangeOptions(seq)
-    opts.include_docs = true
+  async getNextChanges(seq /*: number */) /*: Promise<?MetadataChange[]> */ {
+    const stopMeasure = measureTime('Sync#getNextChanges')
+    const opts = {
+      ...this.baseChangeOptions(seq),
+      include_docs: true,
+      limit: null
+    }
     const p = new Promise((resolve, reject) => {
+      const changes = []
+
       this.lifecycle.once('will-stop', resolve)
       this.changes = this.pouch.db
         .changes(opts)
         .on('change', data => {
           this.lifecycle.off('will-stop', resolve)
-          resolve(data)
+          changes.push(data)
         })
         .on('error', err => {
           this.lifecycle.off('will-stop', resolve)
@@ -304,7 +374,7 @@ class Sync {
         .on('complete', data => {
           this.lifecycle.off('will-stop', resolve)
           if (data.results == null || data.results.length === 0) {
-            resolve(null)
+            resolve(changes)
           }
         })
     })
